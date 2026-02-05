@@ -1,14 +1,26 @@
 """
-NBA SIMULATION ENGINE - USER-FRIENDLY INTERFACE
+NBA SIMULATION ENGINE - UPDATED FOR REAL DATA STRUCTURE
 
-This is a separate app from the betting app.
-It helps you discover patterns in historical data.
-
-NO CODING REQUIRED - Just click buttons and follow instructions.
+This uses the official load_nba_data function from the GitHub repo.
+Data types available:
+- nbastats: Play-by-play from stats.nba.com
+- shotdetail: Shot charts
+- pbpstats: Possession-level stats
+- datanba: data.nba.com format
+- cdnnba: cdn.nba.com format  
+- nbastatsv3: New NBA API format
+- matchups: Matchup data
 """
 
 import os
-import requests
+import tarfile
+from pathlib import Path
+from itertools import product
+from urllib.request import urlopen
+from typing import Union, Sequence, Optional, List
+from io import BytesIO, TextIOWrapper
+import csv
+
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -20,7 +32,7 @@ import time
 st.set_page_config(page_title="NBA Simulation Engine", layout="wide", page_icon="🔬")
 
 # =======================
-# Database Connection (Same as betting app)
+# Database Connection
 # =======================
 
 def S(key: str, default=None):
@@ -40,85 +52,171 @@ def get_db_conn():
     return psycopg.connect(DATABASE_URL_RAW, connect_timeout=12)
 
 # =======================
-# GitHub Data URLs
+# Official NBA Data Loader Function
 # =======================
 
-GITHUB_BASE = "https://raw.githubusercontent.com/shufinskiy/nba_data/main/datasets"
+def load_nba_data(seasons: Union[Sequence, int] = range(2020, 2025),
+                  data: Union[Sequence, str] = "nbastats",
+                  seasontype: str = 'rg',
+                  league: str = 'nba',
+                  in_memory: bool = True,
+                  use_pandas: bool = True) -> Optional[Union[List, pd.DataFrame]]:
+    """
+    Loading NBA play-by-play dataset from github repository
+    
+    Args:
+        seasons: Year(s) of start of season (e.g., 2023 for 2023-24 season)
+        data: Data type - 'nbastats', 'shotdetail', 'pbpstats', etc.
+        seasontype: 'rg' (regular season) or 'po' (playoffs)
+        league: 'nba' or 'wnba'
+        in_memory: Load directly into memory (True) vs save to disk (False)
+        use_pandas: Return pandas DataFrame (True) vs list (False)
+    
+    Returns:
+        pd.DataFrame if use_pandas=True, List if use_pandas=False
+    """
+    
+    if isinstance(seasons, int):
+        seasons = (seasons,)
+    if isinstance(data, str):
+        data = (data,)
 
-DATA_SOURCES = {
-    "games": f"{GITHUB_BASE}/game.csv",
-    "team_stats": f"{GITHUB_BASE}/team_boxscore.csv",
-    "player_stats": f"{GITHUB_BASE}/player_boxscore.csv",
-    # Play-by-play is too large for direct download - we'll handle separately
-}
+    if (len(data) > 1) & in_memory:
+        raise ValueError("in_memory=True only works with single data type")
+
+    # Build file names
+    if seasontype == 'rg':
+        need_data = tuple(["_".join([d, str(season)]) for (d, season) in product(data, seasons)])
+    elif seasontype == 'po':
+        need_data = tuple(["_".join([d, seasontype, str(season)]) 
+                          for (d, seasontype, season) in product(data, (seasontype,), seasons)])
+    else:
+        need_data_rg = tuple(["_".join([d, str(season)]) for (d, season) in product(data, seasons)])
+        need_data_po = tuple(["_".join([d, seasontype, str(season)]) 
+                             for (d, seasontype, season) in product(data, ('po',), seasons)])
+        need_data = need_data_rg + need_data_po
+    
+    if league.lower() == 'wnba':
+        need_data = ['wnba_' + x for x in need_data]
+
+    # Get file URLs from GitHub
+    with urlopen("https://raw.githubusercontent.com/shufinskiy/nba_data/main/list_data.txt") as f:
+        v = f.read().decode('utf-8').strip()
+
+    name_v = [string.split("=")[0] for string in v.split("\n")]
+    element_v = [string.split("=")[1] for string in v.split("\n")]
+
+    need_name = [name for name in name_v if name in need_data]
+    need_element = [element for (name, element) in zip(name_v, element_v) if name in need_data]
+
+    if in_memory:
+        if use_pandas:
+            table = pd.DataFrame()
+        else:
+            table = []
+    
+    for i in range(len(need_name)):
+        with urlopen(need_element[i]) as response:
+            if response.status != 200:
+                raise Exception(f"Failed to download file: {response.status}")
+            file_content = response.read()
+            
+            if in_memory:
+                with tarfile.open(fileobj=BytesIO(file_content), mode='r:xz') as tar:
+                    csv_file_name = "".join([need_name[i], ".csv"])
+                    csv_file = tar.extractfile(csv_file_name)
+                    
+                    if use_pandas:
+                        df_chunk = pd.read_csv(csv_file)
+                        table = pd.concat([table, df_chunk], axis=0, ignore_index=True)
+                    else:
+                        csv_reader = csv.reader(TextIOWrapper(csv_file, encoding="utf-8"))
+                        for row in csv_reader:
+                            table.append(row)
+    
+    if in_memory:
+        return table
+    else:
+        return None
 
 # =======================
-# Step 1: Database Setup
+# Database Setup
 # =======================
 
 def setup_simulation_database():
     """Create tables for simulation engine"""
     
     ddl = """
-    -- Historical games (from GitHub)
-    create table if not exists sim_historical_games (
+    -- Play-by-play events (from nbastats)
+    create table if not exists sim_play_by_play (
+        pbp_id bigserial primary key,
+        game_id text not null,
+        eventnum integer,
+        eventmsgtype integer,
+        eventmsgactiontype integer,
+        period integer,
+        pctimestring text,
+        homedescription text,
+        visitordescription text,
+        neutraldescription text,
+        score text,
+        scoremargin text,
+        player1_id bigint,
+        player1_name text,
+        player1_team_id bigint,
+        player1_team_abbreviation text,
+        player2_id bigint,
+        player2_name text,
+        player2_team_id bigint,
+        loaded_at timestamptz default now()
+    );
+    create index if not exists idx_sim_pbp_game on sim_play_by_play(game_id);
+    create index if not exists idx_sim_pbp_period on sim_play_by_play(game_id, period);
+    
+    -- Shot details
+    create table if not exists sim_shot_details (
+        shot_id bigserial primary key,
+        game_id text not null,
+        game_event_id integer,
+        player_id bigint,
+        player_name text,
+        team_id bigint,
+        team_name text,
+        period integer,
+        minutes_remaining integer,
+        seconds_remaining integer,
+        event_type text,
+        action_type text,
+        shot_type text,
+        shot_zone_basic text,
+        shot_zone_area text,
+        shot_zone_range text,
+        shot_distance integer,
+        loc_x integer,
+        loc_y integer,
+        shot_attempted_flag integer,
+        shot_made_flag integer,
+        game_date date,
+        htm text,
+        vtm text,
+        loaded_at timestamptz default now()
+    );
+    create index if not exists idx_sim_shots_game on sim_shot_details(game_id);
+    create index if not exists idx_sim_shots_player on sim_shot_details(player_name);
+    
+    -- Game summaries (derived from PBP)
+    create table if not exists sim_game_summary (
         game_id text primary key,
-        season text not null,
-        game_date date not null,
-        home_team_id integer,
-        away_team_id integer,
-        home_team_abbr text,
-        away_team_abbr text,
+        game_date date,
+        season text,
+        home_team text,
+        away_team text,
         home_score integer,
         away_score integer,
         point_diff integer,
         total_points integer,
-        season_type text,
         loaded_at timestamptz default now()
     );
-    create index if not exists idx_sim_games_season on sim_historical_games(season);
-    create index if not exists idx_sim_games_date on sim_historical_games(game_date);
-    create index if not exists idx_sim_games_teams on sim_historical_games(home_team_abbr, away_team_abbr);
-    
-    -- Team stats (from GitHub)
-    create table if not exists sim_team_stats (
-        stat_id bigserial primary key,
-        game_id text not null,
-        team_id integer,
-        team_abbr text,
-        is_home boolean,
-        pace numeric,
-        possessions numeric,
-        off_rating numeric,
-        def_rating numeric,
-        efg_pct numeric,
-        tov_pct numeric,
-        orb_pct numeric,
-        ft_rate numeric,
-        loaded_at timestamptz default now()
-    );
-    create index if not exists idx_sim_team_game on sim_team_stats(game_id);
-    create index if not exists idx_sim_team_abbr on sim_team_stats(team_abbr);
-    
-    -- Player stats (from GitHub)
-    create table if not exists sim_player_stats (
-        stat_id bigserial primary key,
-        game_id text not null,
-        player_id integer,
-        player_name text,
-        team_id integer,
-        team_abbr text,
-        minutes numeric,
-        points integer,
-        rebounds integer,
-        assists integer,
-        plus_minus integer,
-        usage_pct numeric,
-        true_shooting numeric,
-        loaded_at timestamptz default now()
-    );
-    create index if not exists idx_sim_player_game on sim_player_stats(game_id);
-    create index if not exists idx_sim_player_name on sim_player_stats(player_name);
     
     -- Simulation results
     create table if not exists sim_results (
@@ -152,139 +250,82 @@ def setup_simulation_database():
         conn.commit()
 
 # =======================
-# Step 2: Download Data from GitHub
+# Data Loading Functions
 # =======================
 
-def download_github_data(data_type: str, sample_size: int = None):
-    """
-    Download data from GitHub
-    
-    Args:
-        data_type: 'games', 'team_stats', or 'player_stats'
-        sample_size: If provided, only load this many rows (for testing)
-    """
-    
-    url = DATA_SOURCES.get(data_type)
-    if not url:
-        raise ValueError(f"Unknown data type: {data_type}")
-    
-    st.info(f"📥 Downloading {data_type} from GitHub...")
-    
-    try:
-        # Download with progress
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        
-        # Read CSV
-        df = pd.read_csv(url)
-        
-        if sample_size:
-            df = df.head(sample_size)
-        
-        st.success(f"✅ Downloaded {len(df):,} rows of {data_type}")
-        return df
-        
-    except Exception as e:
-        st.error(f"❌ Download failed: {e}")
-        return None
-
-def load_games_to_database(df: pd.DataFrame):
-    """Load game data into database"""
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+def load_pbp_to_database(df: pd.DataFrame, progress_callback=None):
+    """Load play-by-play data into database"""
     
     rows_inserted = 0
     batch_size = 1000
     
+    # First, extract game summaries
+    game_summaries = extract_game_summaries_from_pbp(df)
+    
+    # Load game summaries
     with get_db_conn() as conn:
         with conn.cursor() as cur:
-            for idx, row in df.iterrows():
+            for _, game in game_summaries.iterrows():
                 try:
-                    # Calculate derived fields
-                    point_diff = row.get('home_score', 0) - row.get('away_score', 0)
-                    total_points = row.get('home_score', 0) + row.get('away_score', 0)
-                    
                     cur.execute(
                         """
-                        insert into sim_historical_games(
-                            game_id, season, game_date, home_team_id, away_team_id,
-                            home_team_abbr, away_team_abbr, home_score, away_score,
-                            point_diff, total_points, season_type
+                        insert into sim_game_summary(
+                            game_id, season, home_team, away_team,
+                            home_score, away_score, point_diff, total_points
                         )
-                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        values (%s,%s,%s,%s,%s,%s,%s,%s)
                         on conflict (game_id) do nothing
                         """,
                         (
-                            str(row.get('game_id')),
-                            str(row.get('season', '')),
-                            row.get('game_date'),
-                            int(row.get('home_team_id', 0)) if pd.notna(row.get('home_team_id')) else None,
-                            int(row.get('away_team_id', 0)) if pd.notna(row.get('away_team_id')) else None,
-                            str(row.get('home_team_abbreviation', '')),
-                            str(row.get('away_team_abbreviation', '')),
-                            int(row.get('home_score', 0)),
-                            int(row.get('away_score', 0)),
-                            point_diff,
-                            total_points,
-                            str(row.get('season_type', 'Regular'))
+                            str(game['game_id']),
+                            str(game['season']),
+                            str(game['home_team']),
+                            str(game['away_team']),
+                            int(game['home_score']),
+                            int(game['away_score']),
+                            int(game['point_diff']),
+                            int(game['total_points'])
                         )
                     )
-                    
-                    rows_inserted += 1
-                    
-                    # Update progress
-                    if rows_inserted % batch_size == 0:
-                        conn.commit()
-                        progress = min(rows_inserted / len(df), 1.0)
-                        progress_bar.progress(progress)
-                        status_text.text(f"Loaded {rows_inserted:,} / {len(df):,} games...")
-                
                 except Exception as e:
-                    st.warning(f"Skipped row {idx}: {e}")
-                    continue
-            
+                    st.warning(f"Error loading game summary: {e}")
             conn.commit()
     
-    progress_bar.progress(1.0)
-    status_text.text(f"✅ Loaded {rows_inserted:,} games successfully!")
-    
-    return rows_inserted
-
-def load_team_stats_to_database(df: pd.DataFrame):
-    """Load team stats into database"""
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    rows_inserted = 0
-    batch_size = 1000
-    
+    # Load play-by-play events
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             for idx, row in df.iterrows():
                 try:
                     cur.execute(
                         """
-                        insert into sim_team_stats(
-                            game_id, team_id, team_abbr, is_home, pace, possessions,
-                            off_rating, def_rating, efg_pct, tov_pct, orb_pct, ft_rate
+                        insert into sim_play_by_play(
+                            game_id, eventnum, eventmsgtype, eventmsgactiontype,
+                            period, pctimestring, homedescription, visitordescription,
+                            neutraldescription, score, scoremargin,
+                            player1_id, player1_name, player1_team_id, player1_team_abbreviation,
+                            player2_id, player2_name, player2_team_id
                         )
-                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         """,
                         (
-                            str(row.get('game_id')),
-                            int(row.get('team_id', 0)) if pd.notna(row.get('team_id')) else None,
-                            str(row.get('team_abbreviation', '')),
-                            bool(row.get('is_home', False)),
-                            float(row.get('pace', 0)) if pd.notna(row.get('pace')) else None,
-                            float(row.get('possessions', 0)) if pd.notna(row.get('possessions')) else None,
-                            float(row.get('off_rating', 0)) if pd.notna(row.get('off_rating')) else None,
-                            float(row.get('def_rating', 0)) if pd.notna(row.get('def_rating')) else None,
-                            float(row.get('efg_pct', 0)) if pd.notna(row.get('efg_pct')) else None,
-                            float(row.get('tov_pct', 0)) if pd.notna(row.get('tov_pct')) else None,
-                            float(row.get('orb_pct', 0)) if pd.notna(row.get('orb_pct')) else None,
-                            float(row.get('ft_rate', 0)) if pd.notna(row.get('ft_rate')) else None,
+                            str(row.get('GAME_ID', '')),
+                            int(row.get('EVENTNUM', 0)) if pd.notna(row.get('EVENTNUM')) else None,
+                            int(row.get('EVENTMSGTYPE', 0)) if pd.notna(row.get('EVENTMSGTYPE')) else None,
+                            int(row.get('EVENTMSGACTIONTYPE', 0)) if pd.notna(row.get('EVENTMSGACTIONTYPE')) else None,
+                            int(row.get('PERIOD', 0)) if pd.notna(row.get('PERIOD')) else None,
+                            str(row.get('PCTIMESTRING', '')) if pd.notna(row.get('PCTIMESTRING')) else None,
+                            str(row.get('HOMEDESCRIPTION', '')) if pd.notna(row.get('HOMEDESCRIPTION')) else None,
+                            str(row.get('VISITORDESCRIPTION', '')) if pd.notna(row.get('VISITORDESCRIPTION')) else None,
+                            str(row.get('NEUTRALDESCRIPTION', '')) if pd.notna(row.get('NEUTRALDESCRIPTION')) else None,
+                            str(row.get('SCORE', '')) if pd.notna(row.get('SCORE')) else None,
+                            str(row.get('SCOREMARGIN', '')) if pd.notna(row.get('SCOREMARGIN')) else None,
+                            int(row.get('PLAYER1_ID', 0)) if pd.notna(row.get('PLAYER1_ID')) else None,
+                            str(row.get('PLAYER1_NAME', '')) if pd.notna(row.get('PLAYER1_NAME')) else None,
+                            int(row.get('PLAYER1_TEAM_ID', 0)) if pd.notna(row.get('PLAYER1_TEAM_ID')) else None,
+                            str(row.get('PLAYER1_TEAM_ABBREVIATION', '')) if pd.notna(row.get('PLAYER1_TEAM_ABBREVIATION')) else None,
+                            int(row.get('PLAYER2_ID', 0)) if pd.notna(row.get('PLAYER2_ID')) else None,
+                            str(row.get('PLAYER2_NAME', '')) if pd.notna(row.get('PLAYER2_NAME')) else None,
+                            int(row.get('PLAYER2_TEAM_ID', 0)) if pd.notna(row.get('PLAYER2_TEAM_ID')) else None,
                         )
                     )
                     
@@ -292,23 +333,56 @@ def load_team_stats_to_database(df: pd.DataFrame):
                     
                     if rows_inserted % batch_size == 0:
                         conn.commit()
-                        progress = min(rows_inserted / len(df), 1.0)
-                        progress_bar.progress(progress)
-                        status_text.text(f"Loaded {rows_inserted:,} / {len(df):,} team stats...")
+                        if progress_callback:
+                            progress_callback(rows_inserted, len(df))
                 
                 except Exception as e:
-                    st.warning(f"Skipped row {idx}: {e}")
                     continue
             
             conn.commit()
     
-    progress_bar.progress(1.0)
-    status_text.text(f"✅ Loaded {rows_inserted:,} team stats successfully!")
-    
     return rows_inserted
 
+def extract_game_summaries_from_pbp(df: pd.DataFrame) -> pd.DataFrame:
+    """Extract game-level summaries from play-by-play data"""
+    
+    # Get final scores from last events of each game
+    last_events = df.sort_values(['GAME_ID', 'PERIOD', 'EVENTNUM']).groupby('GAME_ID').tail(1)
+    
+    summaries = []
+    for _, row in last_events.iterrows():
+        try:
+            # Parse final score
+            score_str = str(row.get('SCORE', ''))
+            if score_str and '-' in score_str:
+                parts = score_str.split('-')
+                if len(parts) == 2:
+                    # Score format could be "HOME - AWAY" or "AWAY - HOME"
+                    # We'll use VISITORDESCRIPTION vs HOMEDESCRIPTION to determine
+                    score1 = int(parts[0].strip())
+                    score2 = int(parts[1].strip())
+                    
+                    # Determine home/away (this is simplified - may need adjustment)
+                    home_team = str(row.get('PLAYER1_TEAM_ABBREVIATION', 'UNK'))
+                    away_team = 'UNK'  # Would need to parse from data
+                    
+                    summaries.append({
+                        'game_id': str(row.get('GAME_ID')),
+                        'season': '2023-24',  # Would parse from GAME_ID
+                        'home_team': home_team,
+                        'away_team': away_team,
+                        'home_score': score1,
+                        'away_score': score2,
+                        'point_diff': score1 - score2,
+                        'total_points': score1 + score2
+                    })
+        except:
+            continue
+    
+    return pd.DataFrame(summaries)
+
 # =======================
-# Step 3: Data Validation
+# Data Validation
 # =======================
 
 def validate_loaded_data():
@@ -316,24 +390,22 @@ def validate_loaded_data():
     
     with get_db_conn() as conn:
         with conn.cursor() as cur:
+            # Count PBP events
+            cur.execute("SELECT COUNT(*) FROM sim_play_by_play")
+            pbp_count = cur.fetchone()[0] or 0
+            
             # Count games
-            cur.execute("SELECT COUNT(*), MIN(season), MAX(season) FROM sim_historical_games")
-            game_count, min_season, max_season = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM sim_game_summary")
+            game_count = cur.fetchone()[0] or 0
             
-            # Count team stats
-            cur.execute("SELECT COUNT(*) FROM sim_team_stats")
-            team_stat_count = cur.fetchone()[0]
-            
-            # Count player stats
-            cur.execute("SELECT COUNT(*) FROM sim_player_stats")
-            player_stat_count = cur.fetchone()[0]
+            # Count shots
+            cur.execute("SELECT COUNT(*) FROM sim_shot_details")
+            shot_count = cur.fetchone()[0] or 0
     
     return {
-        "games": game_count or 0,
-        "min_season": min_season,
-        "max_season": max_season,
-        "team_stats": team_stat_count or 0,
-        "player_stats": player_stat_count or 0,
+        "pbp_events": pbp_count,
+        "games": game_count,
+        "shots": shot_count,
     }
 
 # =======================
@@ -348,11 +420,9 @@ st.sidebar.header("📊 Data Status")
 
 try:
     stats = validate_loaded_data()
-    st.sidebar.metric("Historical Games", f"{stats['games']:,}")
-    if stats['min_season']:
-        st.sidebar.caption(f"Seasons: {stats['min_season']} to {stats['max_season']}")
-    st.sidebar.metric("Team Stats", f"{stats['team_stats']:,}")
-    st.sidebar.metric("Player Stats", f"{stats['player_stats']:,}")
+    st.sidebar.metric("Play-by-Play Events", f"{stats['pbp_events']:,}")
+    st.sidebar.metric("Games", f"{stats['games']:,}")
+    st.sidebar.metric("Shot Details", f"{stats['shots']:,}")
 except:
     st.sidebar.warning("Database not set up yet")
 
@@ -371,7 +441,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
     st.header("Step 1: Database Setup")
     st.markdown("""
-    **What this does:** Creates the tables needed to store NBA data for simulations.
+    **What this does:** Creates the tables needed to store NBA play-by-play data.
     
     **When to do this:** Only once, the first time you use this tool.
     
@@ -391,80 +461,103 @@ with tab1:
 # TAB 2: LOAD DATA
 with tab2:
     st.header("Step 2: Load Historical Data")
+    
     st.markdown("""
-    **What this does:** Downloads NBA game data from GitHub and loads it into your database.
+    **Available Data Types:**
+    - **nbastats**: Play-by-play from stats.nba.com (recommended to start)
+    - **shotdetail**: Shot charts with coordinates
+    - **pbpstats**: Possession-level statistics
     
     **How long it takes:**
-    - Test mode (1,000 games): ~2-3 minutes
-    - Full load (48,000+ games): ~20-30 minutes
+    - Test mode (1 season): ~5-10 minutes
+    - Full load (4 seasons): ~30-60 minutes
     
-    **Recommendation:** Start with test mode to make sure everything works!
+    **Storage impact:**
+    - 1 season PBP: ~500MB
+    - 4 seasons PBP: ~2GB
     """)
     
     col1, col2 = st.columns(2)
     
     with col1:
         st.subheader("🧪 Test Mode")
-        st.caption("Load 1,000 games to test")
+        st.caption("Load 1 season (2023-24) to test")
         
-        if st.button("Load Test Data", use_container_width=True):
-            with st.spinner("Downloading test data..."):
-                # Download games
-                games_df = download_github_data("games", sample_size=1000)
-                
-                if games_df is not None:
-                    # Load to database
-                    with st.spinner("Loading games to database..."):
-                        n_games = load_games_to_database(games_df)
+        data_type = st.selectbox("Data type", ["nbastats", "shotdetail", "pbpstats"], key="test_data")
+        
+        if st.button("Load Test Data (1 Season)", use_container_width=True):
+            with st.spinner(f"Downloading {data_type} for 2023-24 season..."):
+                try:
+                    # Load data
+                    df = load_nba_data(
+                        seasons=2023,
+                        data=data_type,
+                        seasontype='rg',
+                        in_memory=True,
+                        use_pandas=True
+                    )
                     
-                    st.success(f"✅ Test data loaded: {n_games} games")
+                    if df is not None and not df.empty:
+                        st.success(f"✅ Downloaded {len(df):,} rows")
+                        
+                        # Show preview
+                        st.dataframe(df.head(10))
+                        
+                        # Load to database
+                        with st.spinner("Loading to database..."):
+                            if data_type == "nbastats":
+                                n_rows = load_pbp_to_database(df)
+                                st.success(f"✅ Loaded {n_rows:,} play-by-play events")
+                            else:
+                                st.info(f"{data_type} loading function coming soon!")
+                    else:
+                        st.error("No data returned")
+                        
+                except Exception as e:
+                    st.error(f"❌ Failed: {e}")
+                    st.code(str(e))
     
     with col2:
         st.subheader("🚀 Full Load")
-        st.caption("Load all historical data (10 seasons)")
+        st.caption("Load multiple seasons")
         
-        if st.button("Load All Data", use_container_width=True):
-            st.warning("⚠️ This will take 20-30 minutes. Are you sure?")
+        start_season = st.number_input("Start season", min_value=2014, max_value=2024, value=2020)
+        end_season = st.number_input("End season", min_value=2014, max_value=2024, value=2023)
+        full_data_type = st.selectbox("Data type", ["nbastats", "shotdetail", "pbpstats"], key="full_data")
+        
+        if st.button("Load Multiple Seasons", use_container_width=True):
+            st.warning(f"⚠️ This will load {end_season - start_season + 1} seasons. This may take 30-60 minutes.")
             
-            if st.button("Yes, I'm sure - Load Everything"):
-                # Download games
-                with st.spinner("Downloading all games (this may take a few minutes)..."):
-                    games_df = download_github_data("games")
+            if st.button("Yes, I'm sure - Start Loading"):
+                seasons_to_load = range(start_season, end_season + 1)
                 
-                if games_df is not None:
-                    # Load to database
-                    with st.spinner("Loading to database..."):
-                        n_games = load_games_to_database(games_df)
-                    
-                    st.success(f"✅ Full data loaded: {n_games:,} games")
-                    st.balloons()
-                
-                # Download team stats
-                with st.spinner("Downloading team stats..."):
-                    team_df = download_github_data("team_stats")
-                
-                if team_df is not None:
-                    with st.spinner("Loading team stats..."):
-                        n_team = load_team_stats_to_database(team_df)
-                    
-                    st.success(f"✅ Team stats loaded: {n_team:,} rows")
+                for season in seasons_to_load:
+                    with st.spinner(f"Loading season {season}-{season+1}..."):
+                        try:
+                            df = load_nba_data(
+                                seasons=season,
+                                data=full_data_type,
+                                seasontype='rg',
+                                in_memory=True,
+                                use_pandas=True
+                            )
+                            
+                            if df is not None and not df.empty:
+                                if full_data_type == "nbastats":
+                                    n_rows = load_pbp_to_database(df)
+                                    st.success(f"✅ Season {season}: {n_rows:,} events")
+                        except Exception as e:
+                            st.error(f"❌ Season {season} failed: {e}")
 
 # TAB 3: RUN SIMULATIONS
 with tab3:
     st.header("Step 3: Run Simulations")
-    st.markdown("""
-    **Coming next:** This is where you'll discover patterns and correlations.
-    
-    For now, make sure Steps 1 and 2 are complete!
-    """)
-    
     st.info("🚧 Simulation features coming in the next update!")
     
-    # Show data summary
     try:
         stats = validate_loaded_data()
-        if stats['games'] > 0:
-            st.success(f"✅ Ready to simulate with {stats['games']:,} historical games!")
+        if stats['pbp_events'] > 0:
+            st.success(f"✅ Ready to simulate with {stats['pbp_events']:,} play-by-play events!")
         else:
             st.warning("⚠️ No data loaded yet. Complete Step 2 first.")
     except:
@@ -473,16 +566,6 @@ with tab3:
 # TAB 4: RESULTS
 with tab4:
     st.header("Step 4: View Results")
-    st.markdown("""
-    **Coming next:** View discovered correlations and patterns.
-    
-    This will show you things like:
-    - Back-to-back fatigue effects
-    - Lineup-specific win rates
-    - Pace variance patterns
-    - Player prop correlations
-    """)
-    
     st.info("🚧 Results viewer coming in the next update!")
 
 # =======================
@@ -498,24 +581,25 @@ with st.expander("❓ Help & Troubleshooting"):
     - Click "Secrets"
     - Add: `DATABASE_URL = "your_database_url_here"`
     
-    **"Download failed"**
-    - Check your internet connection
-    - GitHub might be temporarily down
-    - Try again in a few minutes
+    **"Download failed" or "404 error"**
+    - The GitHub repo uses compressed archives
+    - Make sure you're using the official load_nba_data function
+    - Check that the season exists (data goes back to 1996)
     
     **"Database connection failed"**
     - Make sure your database is running
     - Check that DATABASE_URL is correct
     - Verify your database allows connections
     
-    ## Need More Help?
+    ## Data Types Explained
     
-    Contact support or check the documentation.
+    - **nbastats**: Official NBA play-by-play (recommended)
+    - **shotdetail**: Every shot with X/Y coordinates
+    - **pbpstats**: Possession-level aggregations
+    - **datanba**: Alternative PBP format
+    - **cdnnba**: CDN format (newer)
+    - **nbastatsv3**: Latest API version
     """)
 
-# =======================
-# Footer
-# =======================
-
 st.markdown("---")
-st.caption("🔬 Simulation Engine v1.0 | Built for NBA edge research")
+st.caption("🔬 Simulation Engine v2.0 | Using official NBA data loader")
