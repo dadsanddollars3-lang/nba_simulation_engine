@@ -530,126 +530,87 @@ with tab2:
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("🧪 Test Mode")
-        st.caption("Load 1 season (2023-24) to test")
+        st.subheader("📤 Upload Your Data")
+        st.caption("Upload NBA data CSV files (one year at a time)")
         
-        data_type = st.selectbox("Data type", ["nbastats", "shotdetail", "pbpstats"], key="test_data")
+        st.info("""
+        **Supported files:**
+        - nbastats_YYYY.csv (play-by-play)
+        - datanba_YYYY.csv (alternative format)
+        - shotdetail_YYYY.csv (shot charts)
         
-        st.info(f"**Test mode:** Loads ONLY 2023-24 season (~140k events, ~1230 games)")
+        **Start with ONE year to test!**
+        """)
         
-        if st.button("Load Test Data (1 Season)", use_container_width=True):
-            # Status area
-            status_container = st.empty()
-            progress_container = st.empty()
-            preview_container = st.empty()
-            debug_container = st.empty()
+        uploaded_file = st.file_uploader("Choose CSV file", type=['csv'])
+        
+        if uploaded_file is not None:
+            st.success(f"✅ File selected: {uploaded_file.name}")
             
-            try:
-                # Step 1: Download
-                status_container.info("📥 Step 1/2: Downloading 2023-24 season from GitHub...")
+            if st.button("Load This File", use_container_width=True, type="primary"):
+                status_container = st.empty()
+                progress_container = st.empty()
+                preview_container = st.empty()
                 
-                df = load_nba_data(
-                    seasons=2023,  # Just 2023 season (2023-24)
-                    data=data_type,
-                    seasontype='rg',
-                    in_memory=True,
-                    use_pandas=True
-                )
-                
-                if df is not None and not df.empty:
-                    initial_rows = len(df)
+                try:
+                    # Read CSV
+                    status_container.info(f"📖 Reading {uploaded_file.name}...")
+                    df = pd.read_csv(uploaded_file)
                     
-                    # DEBUG: Show sample GAME_IDs to understand format
-                    sample_game_ids = df['GAME_ID'].unique()[:10]
-                    with debug_container.expander("🔍 Debug: Game ID Format"):
-                        st.write("Sample Game IDs:", sample_game_ids)
-                        st.write("First Game ID:", str(sample_game_ids[0]))
-                        st.write("Game ID Length:", len(str(sample_game_ids[0])))
-                        
-                        # Try to extract season from different positions
-                        first_id = str(sample_game_ids[0])
-                        st.write("Positions [0:2]:", first_id[0:2])
-                        st.write("Positions [1:3]:", first_id[1:3])
-                        st.write("Positions [2:4]:", first_id[2:4])
-                        st.write("Positions [3:5]:", first_id[3:5])
-                    
-                    # Try multiple filtering strategies
-                    # Strategy 1: Check if '2023' or '2024' is anywhere in GAME_ID
-                    df_filtered = df[
-                        df['GAME_ID'].astype(str).str.contains('2023') | 
-                        df['GAME_ID'].astype(str).str.contains('2024')
-                    ].copy()
-                    
-                    if len(df_filtered) == 0:
-                        # Strategy 2: Just use all data (maybe it IS all 2023-24)
-                        status_container.warning(f"⚠️ Could not filter by season - using all {initial_rows:,} rows")
-                        df_filtered = df.copy()
-                    else:
-                        filtered_rows = len(df_filtered)
-                        if filtered_rows < initial_rows:
-                            status_container.info(f"✅ Step 1/2: Filtered {initial_rows:,} → {filtered_rows:,} rows for 2023-24")
-                        else:
-                            status_container.success(f"✅ Step 1/2: Downloaded {filtered_rows:,} rows from 2023-24 season")
+                    status_container.success(f"✅ Loaded {len(df):,} rows from {uploaded_file.name}")
                     
                     # Show preview
                     with preview_container.expander("📊 Preview Data"):
-                        st.dataframe(df_filtered.head(10))
-                        st.caption(f"Total rows: {len(df_filtered):,}")
-                        st.caption(f"Unique games: {df_filtered['GAME_ID'].nunique():,}")
+                        st.dataframe(df.head(20))
+                        st.caption(f"Total rows: {len(df):,}")
+                        st.caption(f"Columns: {', '.join(df.columns.tolist()[:10])}")
+                        
+                        if 'GAME_ID' in df.columns:
+                            unique_games = df['GAME_ID'].nunique()
+                            st.caption(f"Unique games: {unique_games:,}")
+                            sample_ids = df['GAME_ID'].unique()[:3]
+                            st.caption(f"Sample Game IDs: {sample_ids}")
                     
-                    # Step 2: Load to database
-                    status_container.info(f"💾 Step 2/2: Loading {len(df_filtered):,} events to database (batch mode)...")
+                    # Determine data type from filename
+                    filename_lower = uploaded_file.name.lower()
+                    if 'nbastats' in filename_lower or 'datanba' in filename_lower:
+                        data_type = "play-by-play"
+                    elif 'shot' in filename_lower:
+                        data_type = "shot details"
+                    else:
+                        data_type = "unknown"
+                    
+                    # Load to database
+                    status_container.info(f"💾 Loading {len(df):,} rows to database...")
                     progress_bar = progress_container.progress(0)
                     
-                    if data_type == "nbastats":
-                        
+                    if data_type == "play-by-play":
                         def update_progress(current, total):
                             progress_bar.progress(min(current / total, 1.0))
                         
-                        n_rows = load_pbp_to_database(df_filtered, progress_callback=update_progress)
+                        n_rows = load_pbp_to_database(df, progress_callback=update_progress)
                         progress_bar.progress(1.0)
-                        status_container.success(f"✅ Complete! Loaded {n_rows:,} events!")
+                        status_container.success(f"✅ Loaded {n_rows:,} play-by-play events!")
                         st.balloons()
                     else:
-                        status_container.info(f"{data_type} loading function coming soon!")
-                else:
-                    status_container.error("❌ No data returned")
-                    
-            except Exception as e:
-                status_container.error(f"❌ Failed: {e}")
-                st.code(str(e))
+                        status_container.warning(f"⚠️ {data_type} loading not yet implemented")
+                
+                except Exception as e:
+                    status_container.error(f"❌ Failed: {e}")
+                    st.code(str(e))
     
     with col2:
-        st.subheader("🚀 Full Load")
-        st.caption("Load multiple seasons")
+        st.subheader("💾 Batch Upload")
+        st.caption("Upload multiple years at once")
         
-        start_season = st.number_input("Start season", min_value=2014, max_value=2024, value=2020)
-        end_season = st.number_input("End season", min_value=2014, max_value=2024, value=2023)
-        full_data_type = st.selectbox("Data type", ["nbastats", "shotdetail", "pbpstats"], key="full_data")
+        st.info("""
+        **Coming soon:** 
+        Upload multiple CSV files and load them sequentially.
         
-        if st.button("Load Multiple Seasons", use_container_width=True):
-            st.warning(f"⚠️ This will load {end_season - start_season + 1} seasons. This may take 30-60 minutes.")
-            
-            if st.button("Yes, I'm sure - Start Loading"):
-                seasons_to_load = range(start_season, end_season + 1)
-                
-                for season in seasons_to_load:
-                    with st.spinner(f"Loading season {season}-{season+1}..."):
-                        try:
-                            df = load_nba_data(
-                                seasons=season,
-                                data=full_data_type,
-                                seasontype='rg',
-                                in_memory=True,
-                                use_pandas=True
-                            )
-                            
-                            if df is not None and not df.empty:
-                                if full_data_type == "nbastats":
-                                    n_rows = load_pbp_to_database(df)
-                                    st.success(f"✅ Season {season}: {n_rows:,} events")
-                        except Exception as e:
-                            st.error(f"❌ Season {season} failed: {e}")
+        **For now:** Upload one file at a time on the left.
+        """)
+        
+        st.caption("Recommended: Start with 1 year, verify it works, then add more.")
 
 # TAB 3: RUN SIMULATIONS
 with tab3:
