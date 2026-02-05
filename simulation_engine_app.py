@@ -262,11 +262,11 @@ def load_pbp_to_database(df: pd.DataFrame, progress_callback=None):
     # First, extract game summaries
     game_summaries = extract_game_summaries_from_pbp(df)
     
-    # Load game summaries
-    with get_db_conn() as conn:
-        with conn.cursor() as cur:
-            for _, game in game_summaries.iterrows():
-                try:
+    # Load game summaries (each in its own transaction)
+    for _, game in game_summaries.iterrows():
+        try:
+            with get_db_conn() as conn:
+                with conn.cursor() as cur:
                     cur.execute(
                         """
                         insert into sim_game_summary(
@@ -287,9 +287,10 @@ def load_pbp_to_database(df: pd.DataFrame, progress_callback=None):
                             int(game['total_points'])
                         )
                     )
-                except Exception as e:
-                    st.warning(f"Error loading game summary: {e}")
-            conn.commit()
+                conn.commit()
+        except Exception as e:
+            # Skip failed game summaries silently
+            pass
     
     # Load play-by-play events
     with get_db_conn() as conn:
@@ -346,37 +347,65 @@ def load_pbp_to_database(df: pd.DataFrame, progress_callback=None):
 def extract_game_summaries_from_pbp(df: pd.DataFrame) -> pd.DataFrame:
     """Extract game-level summaries from play-by-play data"""
     
-    # Get final scores from last events of each game
-    last_events = df.sort_values(['GAME_ID', 'PERIOD', 'EVENTNUM']).groupby('GAME_ID').tail(1)
+    # Get unique games
+    games = df['GAME_ID'].unique()
     
     summaries = []
-    for _, row in last_events.iterrows():
+    for game_id in games:
         try:
-            # Parse final score
-            score_str = str(row.get('SCORE', ''))
+            game_df = df[df['GAME_ID'] == game_id].sort_values(['PERIOD', 'EVENTNUM'])
+            
+            # Get last event (should have final score)
+            last_event = game_df.iloc[-1]
+            
+            # Try to parse score from SCORE field
+            score_str = str(last_event.get('SCORE', ''))
+            
             if score_str and '-' in score_str:
-                parts = score_str.split('-')
+                parts = score_str.strip().split('-')
                 if len(parts) == 2:
-                    # Score format could be "HOME - AWAY" or "AWAY - HOME"
-                    # We'll use VISITORDESCRIPTION vs HOMEDESCRIPTION to determine
-                    score1 = int(parts[0].strip())
-                    score2 = int(parts[1].strip())
-                    
-                    # Determine home/away (this is simplified - may need adjustment)
-                    home_team = str(row.get('PLAYER1_TEAM_ABBREVIATION', 'UNK'))
-                    away_team = 'UNK'  # Would need to parse from data
-                    
-                    summaries.append({
-                        'game_id': str(row.get('GAME_ID')),
-                        'season': '2023-24',  # Would parse from GAME_ID
-                        'home_team': home_team,
-                        'away_team': away_team,
-                        'home_score': score1,
-                        'away_score': score2,
-                        'point_diff': score1 - score2,
-                        'total_points': score1 + score2
-                    })
-        except:
+                    try:
+                        score1 = int(parts[0].strip())
+                        score2 = int(parts[1].strip())
+                        
+                        # Get team abbreviations
+                        home_team = 'UNK'
+                        away_team = 'UNK'
+                        
+                        # Try to get home team from first event with home description
+                        home_events = game_df[game_df['HOMEDESCRIPTION'].notna()]
+                        if not home_events.empty:
+                            home_team = str(home_events.iloc[0].get('PLAYER1_TEAM_ABBREVIATION', 'UNK'))
+                        
+                        # Try to get away team from first event with visitor description  
+                        away_events = game_df[game_df['VISITORDESCRIPTION'].notna()]
+                        if not away_events.empty:
+                            away_team = str(away_events.iloc[0].get('PLAYER1_TEAM_ABBREVIATION', 'UNK'))
+                        
+                        # Parse season from GAME_ID (format: 00XSSSSSSSS where SS is season year)
+                        season = '2023-24'  # Default
+                        try:
+                            game_id_str = str(game_id)
+                            if len(game_id_str) >= 5:
+                                season_code = game_id_str[3:5]
+                                season_year = 2000 + int(season_code)
+                                season = f"{season_year}-{str(season_year + 1)[-2:]}"
+                        except:
+                            pass
+                        
+                        summaries.append({
+                            'game_id': str(game_id),
+                            'season': season,
+                            'home_team': home_team,
+                            'away_team': away_team,
+                            'home_score': score1,
+                            'away_score': score2,
+                            'point_diff': score1 - score2,
+                            'total_points': score1 + score2
+                        })
+                    except (ValueError, TypeError):
+                        pass
+        except Exception:
             continue
     
     return pd.DataFrame(summaries)
