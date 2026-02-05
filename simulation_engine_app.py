@@ -556,12 +556,26 @@ with tab2:
                 )
                 
                 if df is not None and not df.empty:
-                    status_container.success(f"✅ Step 1/2: Downloaded {len(df):,} rows from 2023-24 season")
+                    # FILTER: Only keep 2023-24 season games
+                    # GAME_ID format: 00XSSSSGGGG where SS is season code
+                    # 2023-24 season = '23' in positions 3-5
+                    initial_rows = len(df)
+                    df = df[df['GAME_ID'].astype(str).str[3:5] == '23'].copy()
+                    filtered_rows = len(df)
+                    
+                    if filtered_rows < initial_rows:
+                        status_container.warning(f"⚠️ Downloaded {initial_rows:,} rows, filtered to {filtered_rows:,} for 2023-24 season only")
+                    else:
+                        status_container.success(f"✅ Step 1/2: Downloaded {filtered_rows:,} rows from 2023-24 season")
                     
                     # Show preview
                     with preview_container.expander("📊 Preview Data"):
                         st.dataframe(df.head(10))
-                        st.caption(f"Total rows: {len(df):,}")
+                        st.caption(f"Total rows after filtering: {len(df):,}")
+                        
+                        # Show unique game IDs to verify season
+                        sample_games = df['GAME_ID'].unique()[:5]
+                        st.caption(f"Sample Game IDs: {', '.join(sample_games)}")
                     
                     # Step 2: Load to database
                     status_container.info(f"💾 Step 2/2: Loading {len(df):,} events to database (batch mode)...")
@@ -574,7 +588,7 @@ with tab2:
                         
                         n_rows = load_pbp_to_database(df, progress_callback=update_progress)
                         progress_bar.progress(1.0)
-                        status_container.success(f"✅ Step 2/2: Loaded {n_rows:,} play-by-play events to database!")
+                        status_container.success(f"✅ Complete! Loaded {n_rows:,} events from 2023-24 season!")
                         st.balloons()
                     else:
                         status_container.info(f"{data_type} loading function coming soon!")
