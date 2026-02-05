@@ -254,7 +254,7 @@ def setup_simulation_database():
 # =======================
 
 def load_pbp_to_database(df: pd.DataFrame, progress_callback=None):
-    """Load play-by-play data into database"""
+    """Load play-by-play data into database using batch inserts"""
     
     rows_inserted = 0
     batch_size = 1000
@@ -292,55 +292,76 @@ def load_pbp_to_database(df: pd.DataFrame, progress_callback=None):
             # Skip failed game summaries silently
             pass
     
-    # Load play-by-play events
+    # Load play-by-play events in BATCHES (much faster)
+    batch_rows = []
+    
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             for idx, row in df.iterrows():
                 try:
-                    cur.execute(
-                        """
-                        insert into sim_play_by_play(
-                            game_id, eventnum, eventmsgtype, eventmsgactiontype,
-                            period, pctimestring, homedescription, visitordescription,
-                            neutraldescription, score, scoremargin,
-                            player1_id, player1_name, player1_team_id, player1_team_abbreviation,
-                            player2_id, player2_name, player2_team_id
-                        )
-                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                        """,
-                        (
-                            str(row.get('GAME_ID', '')),
-                            int(row.get('EVENTNUM', 0)) if pd.notna(row.get('EVENTNUM')) else None,
-                            int(row.get('EVENTMSGTYPE', 0)) if pd.notna(row.get('EVENTMSGTYPE')) else None,
-                            int(row.get('EVENTMSGACTIONTYPE', 0)) if pd.notna(row.get('EVENTMSGACTIONTYPE')) else None,
-                            int(row.get('PERIOD', 0)) if pd.notna(row.get('PERIOD')) else None,
-                            str(row.get('PCTIMESTRING', '')) if pd.notna(row.get('PCTIMESTRING')) else None,
-                            str(row.get('HOMEDESCRIPTION', '')) if pd.notna(row.get('HOMEDESCRIPTION')) else None,
-                            str(row.get('VISITORDESCRIPTION', '')) if pd.notna(row.get('VISITORDESCRIPTION')) else None,
-                            str(row.get('NEUTRALDESCRIPTION', '')) if pd.notna(row.get('NEUTRALDESCRIPTION')) else None,
-                            str(row.get('SCORE', '')) if pd.notna(row.get('SCORE')) else None,
-                            str(row.get('SCOREMARGIN', '')) if pd.notna(row.get('SCOREMARGIN')) else None,
-                            int(row.get('PLAYER1_ID', 0)) if pd.notna(row.get('PLAYER1_ID')) else None,
-                            str(row.get('PLAYER1_NAME', '')) if pd.notna(row.get('PLAYER1_NAME')) else None,
-                            int(row.get('PLAYER1_TEAM_ID', 0)) if pd.notna(row.get('PLAYER1_TEAM_ID')) else None,
-                            str(row.get('PLAYER1_TEAM_ABBREVIATION', '')) if pd.notna(row.get('PLAYER1_TEAM_ABBREVIATION')) else None,
-                            int(row.get('PLAYER2_ID', 0)) if pd.notna(row.get('PLAYER2_ID')) else None,
-                            str(row.get('PLAYER2_NAME', '')) if pd.notna(row.get('PLAYER2_NAME')) else None,
-                            int(row.get('PLAYER2_TEAM_ID', 0)) if pd.notna(row.get('PLAYER2_TEAM_ID')) else None,
-                        )
-                    )
+                    batch_rows.append((
+                        str(row.get('GAME_ID', '')),
+                        int(row.get('EVENTNUM', 0)) if pd.notna(row.get('EVENTNUM')) else None,
+                        int(row.get('EVENTMSGTYPE', 0)) if pd.notna(row.get('EVENTMSGTYPE')) else None,
+                        int(row.get('EVENTMSGACTIONTYPE', 0)) if pd.notna(row.get('EVENTMSGACTIONTYPE')) else None,
+                        int(row.get('PERIOD', 0)) if pd.notna(row.get('PERIOD')) else None,
+                        str(row.get('PCTIMESTRING', '')) if pd.notna(row.get('PCTIMESTRING')) else None,
+                        str(row.get('HOMEDESCRIPTION', '')) if pd.notna(row.get('HOMEDESCRIPTION')) else None,
+                        str(row.get('VISITORDESCRIPTION', '')) if pd.notna(row.get('VISITORDESCRIPTION')) else None,
+                        str(row.get('NEUTRALDESCRIPTION', '')) if pd.notna(row.get('NEUTRALDESCRIPTION')) else None,
+                        str(row.get('SCORE', '')) if pd.notna(row.get('SCORE')) else None,
+                        str(row.get('SCOREMARGIN', '')) if pd.notna(row.get('SCOREMARGIN')) else None,
+                        int(row.get('PLAYER1_ID', 0)) if pd.notna(row.get('PLAYER1_ID')) else None,
+                        str(row.get('PLAYER1_NAME', '')) if pd.notna(row.get('PLAYER1_NAME')) else None,
+                        int(row.get('PLAYER1_TEAM_ID', 0)) if pd.notna(row.get('PLAYER1_TEAM_ID')) else None,
+                        str(row.get('PLAYER1_TEAM_ABBREVIATION', '')) if pd.notna(row.get('PLAYER1_TEAM_ABBREVIATION')) else None,
+                        int(row.get('PLAYER2_ID', 0)) if pd.notna(row.get('PLAYER2_ID')) else None,
+                        str(row.get('PLAYER2_NAME', '')) if pd.notna(row.get('PLAYER2_NAME')) else None,
+                        int(row.get('PLAYER2_TEAM_ID', 0)) if pd.notna(row.get('PLAYER2_TEAM_ID')) else None,
+                    ))
                     
-                    rows_inserted += 1
-                    
-                    if rows_inserted % batch_size == 0:
+                    # When batch is full, insert all at once
+                    if len(batch_rows) >= batch_size:
+                        cur.executemany(
+                            """
+                            insert into sim_play_by_play(
+                                game_id, eventnum, eventmsgtype, eventmsgactiontype,
+                                period, pctimestring, homedescription, visitordescription,
+                                neutraldescription, score, scoremargin,
+                                player1_id, player1_name, player1_team_id, player1_team_abbreviation,
+                                player2_id, player2_name, player2_team_id
+                            )
+                            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            """,
+                            batch_rows
+                        )
                         conn.commit()
+                        rows_inserted += len(batch_rows)
+                        batch_rows = []
+                        
                         if progress_callback:
                             progress_callback(rows_inserted, len(df))
                 
                 except Exception as e:
                     continue
             
-            conn.commit()
+            # Insert remaining rows
+            if batch_rows:
+                cur.executemany(
+                    """
+                    insert into sim_play_by_play(
+                        game_id, eventnum, eventmsgtype, eventmsgactiontype,
+                        period, pctimestring, homedescription, visitordescription,
+                        neutraldescription, score, scoremargin,
+                        player1_id, player1_name, player1_team_id, player1_team_abbreviation,
+                        player2_id, player2_name, player2_team_id
+                    )
+                    values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    batch_rows
+                )
+                conn.commit()
+                rows_inserted += len(batch_rows)
     
     return rows_inserted
 
@@ -514,37 +535,55 @@ with tab2:
         
         data_type = st.selectbox("Data type", ["nbastats", "shotdetail", "pbpstats"], key="test_data")
         
+        st.info(f"**Test mode:** Loads ONLY 2023-24 season (~140k events, ~1230 games)")
+        
         if st.button("Load Test Data (1 Season)", use_container_width=True):
-            with st.spinner(f"Downloading {data_type} for 2023-24 season..."):
-                try:
-                    # Load data
-                    df = load_nba_data(
-                        seasons=2023,
-                        data=data_type,
-                        seasontype='rg',
-                        in_memory=True,
-                        use_pandas=True
-                    )
+            # Status area
+            status_container = st.empty()
+            progress_container = st.empty()
+            preview_container = st.empty()
+            
+            try:
+                # Step 1: Download
+                status_container.info("📥 Step 1/2: Downloading 2023-24 season from GitHub...")
+                
+                df = load_nba_data(
+                    seasons=2023,  # Just 2023 season (2023-24)
+                    data=data_type,
+                    seasontype='rg',
+                    in_memory=True,
+                    use_pandas=True
+                )
+                
+                if df is not None and not df.empty:
+                    status_container.success(f"✅ Step 1/2: Downloaded {len(df):,} rows from 2023-24 season")
                     
-                    if df is not None and not df.empty:
-                        st.success(f"✅ Downloaded {len(df):,} rows")
-                        
-                        # Show preview
+                    # Show preview
+                    with preview_container.expander("📊 Preview Data"):
                         st.dataframe(df.head(10))
+                        st.caption(f"Total rows: {len(df):,}")
+                    
+                    # Step 2: Load to database
+                    status_container.info(f"💾 Step 2/2: Loading {len(df):,} events to database (batch mode)...")
+                    progress_bar = progress_container.progress(0)
+                    
+                    if data_type == "nbastats":
                         
-                        # Load to database
-                        with st.spinner("Loading to database..."):
-                            if data_type == "nbastats":
-                                n_rows = load_pbp_to_database(df)
-                                st.success(f"✅ Loaded {n_rows:,} play-by-play events")
-                            else:
-                                st.info(f"{data_type} loading function coming soon!")
+                        def update_progress(current, total):
+                            progress_bar.progress(min(current / total, 1.0))
+                        
+                        n_rows = load_pbp_to_database(df, progress_callback=update_progress)
+                        progress_bar.progress(1.0)
+                        status_container.success(f"✅ Step 2/2: Loaded {n_rows:,} play-by-play events to database!")
+                        st.balloons()
                     else:
-                        st.error("No data returned")
-                        
-                except Exception as e:
-                    st.error(f"❌ Failed: {e}")
-                    st.code(str(e))
+                        status_container.info(f"{data_type} loading function coming soon!")
+                else:
+                    status_container.error("❌ No data returned")
+                    
+            except Exception as e:
+                status_container.error(f"❌ Failed: {e}")
+                st.code(str(e))
     
     with col2:
         st.subheader("🚀 Full Load")
