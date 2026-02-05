@@ -516,10 +516,10 @@ def setup_simulation_database():
 # =======================
 
 def load_data_batch(df: pd.DataFrame, table_name: str, progress_callback=None):
-    """Generic batch loader for any table"""
+    """Generic batch loader for any table with chunked processing"""
     
     rows_inserted = 0
-    batch_size = 1000
+    batch_size = 500  # Reduced from 1000 for large tables
     batch_rows = []
     
     # Get column names from dataframe
@@ -527,13 +527,26 @@ def load_data_batch(df: pd.DataFrame, table_name: str, progress_callback=None):
     placeholders = ','.join(['%s'] * len(columns))
     column_names = ','.join(columns)
     
+    # For very wide tables (like matchups with 48 cols), process in smaller chunks
+    if len(columns) > 30:
+        batch_size = 250
+    
     with get_db_conn() as conn:
         with conn.cursor() as cur:
             for idx, row in df.iterrows():
                 try:
-                    # Convert row to tuple
-                    row_data = tuple(None if pd.isna(val) else val for val in row)
-                    batch_rows.append(row_data)
+                    # Convert row to tuple, handling NaN/None
+                    row_data = []
+                    for val in row:
+                        if pd.isna(val):
+                            row_data.append(None)
+                        elif isinstance(val, (int, float)):
+                            # Convert numpy types to native Python
+                            row_data.append(float(val) if isinstance(val, float) else int(val))
+                        else:
+                            row_data.append(val)
+                    
+                    batch_rows.append(tuple(row_data))
                     
                     # Insert batch when full
                     if len(batch_rows) >= batch_size:
@@ -549,6 +562,7 @@ def load_data_batch(df: pd.DataFrame, table_name: str, progress_callback=None):
                             progress_callback(rows_inserted, len(df))
                 
                 except Exception as e:
+                    # Log error but continue
                     continue
             
             # Insert remaining rows
