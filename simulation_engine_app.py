@@ -542,6 +542,7 @@ with tab2:
             status_container = st.empty()
             progress_container = st.empty()
             preview_container = st.empty()
+            debug_container = st.empty()
             
             try:
                 # Step 1: Download
@@ -556,29 +557,48 @@ with tab2:
                 )
                 
                 if df is not None and not df.empty:
-                    # FILTER: Only keep 2023-24 season games
-                    # GAME_ID format: 00XSSSSGGGG where SS is season code
-                    # 2023-24 season = '23' in positions 3-5
                     initial_rows = len(df)
-                    df = df[df['GAME_ID'].astype(str).str[3:5] == '23'].copy()
-                    filtered_rows = len(df)
                     
-                    if filtered_rows < initial_rows:
-                        status_container.warning(f"⚠️ Downloaded {initial_rows:,} rows, filtered to {filtered_rows:,} for 2023-24 season only")
+                    # DEBUG: Show sample GAME_IDs to understand format
+                    sample_game_ids = df['GAME_ID'].unique()[:10]
+                    with debug_container.expander("🔍 Debug: Game ID Format"):
+                        st.write("Sample Game IDs:", sample_game_ids)
+                        st.write("First Game ID:", str(sample_game_ids[0]))
+                        st.write("Game ID Length:", len(str(sample_game_ids[0])))
+                        
+                        # Try to extract season from different positions
+                        first_id = str(sample_game_ids[0])
+                        st.write("Positions [0:2]:", first_id[0:2])
+                        st.write("Positions [1:3]:", first_id[1:3])
+                        st.write("Positions [2:4]:", first_id[2:4])
+                        st.write("Positions [3:5]:", first_id[3:5])
+                    
+                    # Try multiple filtering strategies
+                    # Strategy 1: Check if '2023' or '2024' is anywhere in GAME_ID
+                    df_filtered = df[
+                        df['GAME_ID'].astype(str).str.contains('2023') | 
+                        df['GAME_ID'].astype(str).str.contains('2024')
+                    ].copy()
+                    
+                    if len(df_filtered) == 0:
+                        # Strategy 2: Just use all data (maybe it IS all 2023-24)
+                        status_container.warning(f"⚠️ Could not filter by season - using all {initial_rows:,} rows")
+                        df_filtered = df.copy()
                     else:
-                        status_container.success(f"✅ Step 1/2: Downloaded {filtered_rows:,} rows from 2023-24 season")
+                        filtered_rows = len(df_filtered)
+                        if filtered_rows < initial_rows:
+                            status_container.info(f"✅ Step 1/2: Filtered {initial_rows:,} → {filtered_rows:,} rows for 2023-24")
+                        else:
+                            status_container.success(f"✅ Step 1/2: Downloaded {filtered_rows:,} rows from 2023-24 season")
                     
                     # Show preview
                     with preview_container.expander("📊 Preview Data"):
-                        st.dataframe(df.head(10))
-                        st.caption(f"Total rows after filtering: {len(df):,}")
-                        
-                        # Show unique game IDs to verify season
-                        sample_games = df['GAME_ID'].unique()[:5]
-                        st.caption(f"Sample Game IDs: {', '.join(sample_games)}")
+                        st.dataframe(df_filtered.head(10))
+                        st.caption(f"Total rows: {len(df_filtered):,}")
+                        st.caption(f"Unique games: {df_filtered['GAME_ID'].nunique():,}")
                     
                     # Step 2: Load to database
-                    status_container.info(f"💾 Step 2/2: Loading {len(df):,} events to database (batch mode)...")
+                    status_container.info(f"💾 Step 2/2: Loading {len(df_filtered):,} events to database (batch mode)...")
                     progress_bar = progress_container.progress(0)
                     
                     if data_type == "nbastats":
@@ -586,9 +606,9 @@ with tab2:
                         def update_progress(current, total):
                             progress_bar.progress(min(current / total, 1.0))
                         
-                        n_rows = load_pbp_to_database(df, progress_callback=update_progress)
+                        n_rows = load_pbp_to_database(df_filtered, progress_callback=update_progress)
                         progress_bar.progress(1.0)
-                        status_container.success(f"✅ Complete! Loaded {n_rows:,} events from 2023-24 season!")
+                        status_container.success(f"✅ Complete! Loaded {n_rows:,} events!")
                         st.balloons()
                     else:
                         status_container.info(f"{data_type} loading function coming soon!")
